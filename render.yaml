@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: himya-platforma
+    runtime: python
+    plan: starter
+    region: frankfurt
+    buildCommand: python3 -m compileall -q server.py
+    startCommand: python3 server.py
+    healthCheckPath: /api/settings
+    autoDeployTrigger: commit
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: CHEM_DATA_DIR
+        value: /var/data
+      - key: INITIAL_ADMIN_NAME
+        value: Әкімші
+      - key: INITIAL_ADMIN_EMAIL
+        sync: false
+      - key: INITIAL_ADMIN_PASSWORD
+        sync: false
+    disk:
+      name: himya-data
+      mountPath: /var/data
+      sizeGB: 1
