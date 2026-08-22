@@ -7,6 +7,12 @@
     <title>Үздіксіз білім беру платформасы</title>
     <link rel="icon" href="data:," />
     <script>
+      // Keep static assets anchored to the application root even when a
+      // GitHub Pages deep link is restored with the History API.
+      document.write(
+        `<base href="${location.hostname.endsWith("github.io") ? "/himya-platforma/" : "/"}">`,
+      );
+
       (function (location) {
         if (location.search.startsWith("?/")) {
           const route = location.search.slice(2).replace(/~and~/g, "&");
