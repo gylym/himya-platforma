@@ -37,6 +37,17 @@ jobs:
         run: |
           mkdir -p public-site
           cp index.html 404.html .nojekyll app.js store.js data.js config.js catalog.js platform-utils.js styles.css components.css accessibility.css learning.css platform.css public-site/
+          python3 - <<'PYBUILD'
+          import os, pathlib, re
+          root = pathlib.Path("public-site")
+          revision = os.environ["GITHUB_SHA"]
+          for asset in root.glob("*.js"):
+              text = re.sub(r"([\"'])(\./[a-zA-Z0-9_.-]+\.js)\1", lambda m: m[1] + m[2] + "?v=" + revision + m[1], asset.read_text())
+              asset.write_text(text)
+          index = root / "index.html"
+          text = re.sub(r"((?:src|href)=[\"'])([a-zA-Z0-9_.-]+\.(?:js|css))([\"'])", lambda m: m[1] + m[2] + "?v=" + revision + m[3], index.read_text())
+          index.write_text(text)
+          PYBUILD
       - uses: actions/upload-pages-artifact@v3
         with:
           path: public-site
