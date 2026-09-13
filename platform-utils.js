@@ -10,6 +10,7 @@ export function validateFile(file) {
 export function errorMessage(error) {
   const raw = String(error?.message || error || '');
   if (/invalid login|invalid credentials/i.test(raw)) return 'Email/логин немесе пароль қате';
+  if (/email address not authorized|email_address_not_authorized|error sending confirmation email|smtp/i.test(raw)) return 'Тіркелу хатын жіберу қазір қолжетімсіз. Әкімшіге хабарласыңыз';
   if (/email not confirmed/i.test(raw)) return 'Email мекенжайыңызды хаттағы сілтеме арқылы растаңыз';
   if (/Database error saving new user/i.test(raw)) return 'Тіркелу орындалмады. Басқа логинді қолданып көріңіз немесе әкімшіге хабарласыңыз';
   if (/already registered|already been registered/i.test(raw)) return 'Бұл email бұрын тіркелген. Кіру бетін ашыңыз';
