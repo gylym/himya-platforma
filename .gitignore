@@ -3,3 +3,7 @@
 data/
 __pycache__/
 *.py[cod]
+
+__pycache__/
+*.pyc
+public-site/
