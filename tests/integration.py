@@ -29,7 +29,7 @@ class PlatformIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory()
-        env = {**os.environ, "CHEM_DATA_DIR": cls.temp.name, "PORT": str(PORT)}
+        env = {**os.environ, "INITIAL_ADMIN_PASSWORD":"Admin123!", "CHEM_DATA_DIR": cls.temp.name, "PORT": str(PORT)}
         cls.server = subprocess.Popen(["python3", "server.py"], cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for _ in range(40):
             try:
