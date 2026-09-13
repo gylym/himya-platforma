@@ -238,7 +238,9 @@ function bindCatalogActions(){
 }
 async function handleMaterial(event){
  event.preventDefault();const form=event.currentTarget,data=new FormData(form),error=form.querySelector('#material-error'),button=form.querySelector('[type="submit"]'),status=form.querySelector('#upload-status');
- if(!form.reportValidity())return;error.textContent='';const file=data.get('file'),hasFile=file?.size>0,existing=state.items.find(i=>i.id===form.dataset.id);let item=existing,fileSaved=false;
+ error.textContent='';const file=data.get('file'),hasFile=file?.size>0,existing=state.items.find(i=>i.id===form.dataset.id);let item=existing,fileSaved=false;
+ if(!hasFile&&!existing&&!form.dataset.id.startsWith('resource:')){error.textContent='Файл таңдалмады';return;}
+ if(!form.checkValidity()){error.textContent='Міндетті өрістерді дұрыс толтырыңыз';form.reportValidity();return;}
  button.disabled=true;button.textContent='Жүктелуде...';
  try{if(form.dataset.id.startsWith('resource:')){await store.updateResourceMetadata(form.dataset.id.slice(9),{title:String(data.get('title')).trim(),description:String(data.get('description')).trim(),category:data.get('category'),subject:data.get('subject'),is_published:data.get('published')==='on'});await refreshCatalog();navigate('/admin/materials');showToast('Материал сәтті өңделді');return;}if(hasFile)validateFile(file);else if(!existing)throw new Error('Файл таңдалмады');button.disabled=true;button.textContent='Жүктелуде...';const parent=state.items.find(i=>i.id===data.get('parent_id'));if(!parent)throw new Error('Тақырыпты таңдаңыз');
  const patch={title:String(data.get('title')).trim(),description:String(data.get('description')).trim(),subject:data.get('subject'),category:data.get('category'),parent_id:parent.id,area:parent.area};
