@@ -4,6 +4,8 @@ from pathlib import Path
 from datetime import datetime, timezone
 from html import escape
 from html.parser import HTMLParser
+import re
+from http.cookies import SimpleCookie
 import hashlib
 import json
 import mimetypes
@@ -231,6 +233,15 @@ def init_database():
         );
         """)
         columns = {row["name"] for row in connection.execute("pragma table_info(content_items)")}
+        for field,default in [("description",""),("subject","Химия"),("category","Басқа")]:
+            if field not in columns: connection.execute(f"alter table content_items add column {field} text not null default '{default}'")
+        resource_columns={row['name'] for row in connection.execute('pragma table_info(resources)')}
+        for field in ('title','description','subject','category'):
+            if field not in resource_columns: connection.execute(f"alter table resources add column {field} text not null default ''")
+        if 'is_published' not in resource_columns: connection.execute("alter table resources add column is_published integer not null default 1")
+        user_columns = {row["name"] for row in connection.execute("pragma table_info(users)")}
+        if "username" not in user_columns: connection.execute("alter table users add column username text")
+        connection.execute("create unique index if not exists users_username_unique on users(lower(username)) where username is not null")
         if "item_type" not in columns: connection.execute("alter table content_items add column item_type text not null default 'lesson'")
         if "content_mode" not in columns: connection.execute("alter table content_items add column content_mode text not null default 'curriculum'")
         progress_columns = {row["name"] for row in connection.execute("pragma table_info(progress)")}
@@ -239,13 +250,13 @@ def init_database():
         if "tested_at" not in progress_columns: connection.execute("alter table progress add column tested_at text")
         connection.execute("insert or ignore into site_settings values ('main',?,?)", (json.dumps(DEFAULT_SETTINGS,ensure_ascii=False),now()))
         admin = connection.execute("select id from users where role='admin' limit 1").fetchone()
-        if not admin:
+        if not admin and os.environ.get("INITIAL_ADMIN_PASSWORD"):
             admin_name = os.environ.get("INITIAL_ADMIN_NAME", "Әкімші").strip() or "Әкімші"
             admin_email = os.environ.get("INITIAL_ADMIN_EMAIL", "admin@chem.local").strip().lower()
-            admin_password = os.environ.get("INITIAL_ADMIN_PASSWORD", "Admin123!")
+            admin_password = os.environ["INITIAL_ADMIN_PASSWORD"]
             if len(admin_password) < 8:
                 raise RuntimeError("INITIAL_ADMIN_PASSWORD кемінде 8 таңба болуы керек")
-            connection.execute("insert into users values (?,?,?,?,?,?)", (str(uuid.uuid4()), admin_name, admin_email, "admin", password_hash(admin_password), now()))
+            connection.execute("insert into users(id,display_name,email,role,password_hash,created_at) values (?,?,?,?,?,?)", (str(uuid.uuid4()), admin_name, admin_email, "admin", password_hash(admin_password), now()))
         for item_id, parent_id, area, title, path, order in SEED_CONTENT:
             connection.execute("""insert or ignore into content_items
               (id,parent_id,area,title,path,body,video_url,quiz_data,sort_order,is_published,created_at,updated_at)
@@ -283,6 +294,11 @@ class SpaHandler(SimpleHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(payload)))
+        if isinstance(data,dict) and data.get('token'):
+            secure='; Secure' if self.headers.get('X-Forwarded-Proto')=='https' else ''
+            self.send_header('Set-Cookie',f"chem_session={data['token']}; HttpOnly; SameSite=Strict; Path=/; Max-Age=604800{secure}")
+        if urlparse(self.path).path=='/api/logout': self.send_header('Set-Cookie','chem_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0')
+        self.send_header('X-Content-Type-Options','nosniff')
         self.end_headers()
         self.wfile.write(payload)
 
@@ -299,11 +315,14 @@ class SpaHandler(SimpleHTTPRequestHandler):
         auth = self.headers.get("Authorization", "")
         token = auth[7:] if auth.startswith("Bearer ") else ""
         if not token:
+            cookie=SimpleCookie(self.headers.get('Cookie',''))
+            token=cookie['chem_session'].value if 'chem_session' in cookie else ''
+        if not token:
             if required: raise ApiError(401, "Кіру қажет")
             return None
         with db() as connection:
             row = connection.execute("""select users.id,users.display_name,users.email,users.role
-              from sessions join users on users.id=sessions.user_id where sessions.token=?""", (token,)).fetchone()
+              from sessions join users on users.id=sessions.user_id where sessions.token=? and datetime(sessions.created_at)>datetime('now','-7 days')""", (token,)).fetchone()
         if not row and required: raise ApiError(401, "Сессия аяқталды")
         return dict(row) if row else None
 
@@ -311,6 +330,18 @@ class SpaHandler(SimpleHTTPRequestHandler):
         user = self.user(True)
         if user["role"] != "admin": raise ApiError(403, "Қолжетім жоқ")
         return user
+
+    def content_visible(self,item_id):
+        with db() as connection:
+            rows=connection.execute("""with recursive parents(id,parent_id,is_published) as (
+              select id,parent_id,is_published from content_items where id=?
+              union select c.id,c.parent_id,c.is_published from content_items c join parents p on c.id=p.parent_id)
+              select is_published from parents""",(item_id,)).fetchall()
+        return bool(rows) and all(row['is_published'] for row in rows)
+
+    def require_content(self,item_id):
+        user=self.user(False)
+        if not (user and user['role']=='admin') and not self.content_visible(item_id): raise ApiError(403,'Бұл материалға кіруге рұқсатыңыз жоқ')
 
     def route_api(self, method):
         parsed = urlparse(self.path)
@@ -324,29 +355,35 @@ class SpaHandler(SimpleHTTPRequestHandler):
             if role not in ("student", "university_student"): raise ApiError(400, "Бұл рөлмен тіркелуге болмайды")
             if len(data.get("password", "")) < 8: raise ApiError(400, "Құпиясөз кемінде 8 таңба болуы керек")
             email = data.get("email", "").strip().lower(); name = data.get("displayName", "").strip()
-            if not email or not name: raise ApiError(400, "Мәліметтерді толық енгізіңіз")
+            if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) or not name: raise ApiError(400, "Email және аты-жөніңізді дұрыс енгізіңіз")
+            username=str(data.get('username') or '').strip().lower() or None
+            if username and not re.fullmatch(r'[a-z0-9_]{3,32}',username): raise ApiError(400,'Логин 3–32 латын әрпі, сан немесе _ болуы керек')
             user_id = str(uuid.uuid4()); token = secrets.token_urlsafe(32)
             try:
                 with db() as connection:
-                    connection.execute("insert into users values (?,?,?,?,?,?)", (user_id,name,email,role,password_hash(data["password"]),now()))
+                    connection.execute("insert into users(id,display_name,email,role,password_hash,created_at) values (?,?,?,?,?,?)", (user_id,name,email,role,password_hash(data["password"]),now()))
+                    connection.execute("update users set username=? where id=?",(username,user_id))
                     connection.execute("insert into sessions values (?,?,?)", (token,user_id,now()))
             except sqlite3.IntegrityError: raise ApiError(409, "Бұл email бұрын тіркелген")
             return self.json_response({"token":token,"user":{"id":user_id,"display_name":name,"email":email,"role":role}}, 201)
         if method == "POST" and path == "/api/login":
             data = self.read_json(); email = data.get("email", "").strip().lower()
             with db() as connection:
-                row = connection.execute("select * from users where email=?", (email,)).fetchone()
+                row = connection.execute("select * from users where email=? or username=?", (email,email)).fetchone()
                 if not row or not password_ok(data.get("password", ""), row["password_hash"]): raise ApiError(401, "Email немесе құпиясөз қате")
-                if row["role"] != data.get("role"): raise ApiError(403, "Таңдалған рөл сәйкес келмейді")
                 token = secrets.token_urlsafe(32)
                 connection.execute("insert into sessions values (?,?,?)", (token,row["id"],now()))
             return self.json_response({"token":token,"user":{key:row[key] for key in ("id","display_name","email","role")}})
         if method == "POST" and path == "/api/logout":
             auth = self.headers.get("Authorization", "")
-            token = auth[7:] if auth.startswith("Bearer ") else ""
+            cookie=SimpleCookie(self.headers.get('Cookie',''))
+            token = auth[7:] if auth.startswith("Bearer ") else (cookie['chem_session'].value if 'chem_session' in cookie else '')
             with db() as connection: connection.execute("delete from sessions where token=?", (token,))
             return self.json_response({"ok":True})
 
+        if method == 'GET' and path == '/api/popularity':
+            with db() as connection:rows=connection.execute('select item_id,sum(view_count) as views from progress group by item_id having views>0 order by views desc limit 20').fetchall()
+            return self.json_response([dict(row) for row in rows if self.content_visible(row['item_id'])])
         if method == "GET" and path == "/api/settings":
             with db() as connection: row = connection.execute("select settings from site_settings where id='main'").fetchone()
             return self.json_response(json.loads(row["settings"]) if row else DEFAULT_SETTINGS)
@@ -359,7 +396,7 @@ class SpaHandler(SimpleHTTPRequestHandler):
             user = self.user(False); admin_view = query.get("admin", [""])[0] == "1" and user and user["role"] == "admin"
             where = "" if admin_view else "where is_published=1"
             with db() as connection: rows = connection.execute(f"select * from content_items {where} order by sort_order,title").fetchall()
-            return self.json_response([self.content_row(row) for row in rows])
+            return self.json_response([self.content_row(row) for row in rows if admin_view or self.content_visible(row["id"])])
         if method == "POST" and path == "/api/content":
             self.admin(); data = self.read_json(); item_id = str(uuid.uuid4())
             self.validate_content(data)
@@ -367,6 +404,7 @@ class SpaHandler(SimpleHTTPRequestHandler):
                 connection.execute("""insert into content_items
                   (id,parent_id,area,item_type,content_mode,title,path,body,video_url,quiz_data,sort_order,is_published,created_at,updated_at)
                   values (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (item_id,data.get("parent_id"),data["area"],data.get("item_type","lesson"),data.get("content_mode","curriculum"),data["title"].strip(),data["path"].strip(),sanitize_rich_text(data.get("body", "")),data.get("video_url", ""),json.dumps(data.get("quiz_data") or {},ensure_ascii=False),int(data.get("sort_order",0)),1 if data.get("is_published") else 0,now(),now()))
+                connection.execute("update content_items set description=?,subject=?,category=? where id=?",(str(data.get('description',''))[:1500],str(data.get('subject','Химия'))[:100],str(data.get('category','Басқа'))[:100],item_id))
                 row = connection.execute("select * from content_items where id=?", (item_id,)).fetchone()
             return self.json_response(self.content_row(row), 201)
         if method == "PATCH" and path == "/api/content/reorder":
@@ -386,33 +424,52 @@ class SpaHandler(SimpleHTTPRequestHandler):
             self.admin(); item_id = unquote(path.rsplit("/",1)[1])
             with db() as connection:
                 if method == "DELETE":
-                    stored = connection.execute("select stored_name from resources where item_id=?", (item_id,)).fetchall()
+                    stored = connection.execute("with recursive children(id) as (select id from content_items where id=? union select c.id from content_items c join children p on c.parent_id=p.id) select stored_name from resources where item_id in (select id from children)", (item_id,)).fetchall()
                     connection.execute("delete from content_items where id=?", (item_id,))
                     for row in stored: (UPLOAD_DIR / row["stored_name"]).unlink(missing_ok=True)
                     return self.json_response({"ok":True})
                 data = self.read_json(); self.validate_content(data)
+                parent=data.get('parent_id')
+                seen={item_id}
+                while parent:
+                    if parent in seen: raise ApiError(400,'Бөлімді өз ішіне орналастыруға болмайды')
+                    seen.add(parent);row_parent=connection.execute('select parent_id from content_items where id=?',(parent,)).fetchone()
+                    parent=row_parent['parent_id'] if row_parent else None
                 connection.execute("""update content_items set parent_id=?,area=?,item_type=?,content_mode=?,title=?,path=?,body=?,video_url=?,quiz_data=?,sort_order=?,is_published=?,updated_at=? where id=?""", (data.get("parent_id"),data["area"],data.get("item_type","lesson"),data.get("content_mode","curriculum"),data["title"].strip(),data["path"].strip(),sanitize_rich_text(data.get("body", "")),data.get("video_url", ""),json.dumps(data.get("quiz_data") or {},ensure_ascii=False),int(data.get("sort_order",0)),1 if data.get("is_published") else 0,now(),item_id))
+                connection.execute("update content_items set description=?,subject=?,category=? where id=?",(str(data.get('description',''))[:1500],str(data.get('subject','Химия'))[:100],str(data.get('category','Басқа'))[:100],item_id))
                 row = connection.execute("select * from content_items where id=?", (item_id,)).fetchone()
             if not row: raise ApiError(404, "Бөлім табылмады")
             return self.json_response(self.content_row(row))
 
         if method == "GET" and path == "/api/resources":
             item_id = query.get("item_id", [""])[0]
-            with db() as connection: rows = connection.execute("select id,item_id,filename,mime_type,size,created_at from resources where item_id=? order by created_at", (item_id,)).fetchall()
-            return self.json_response([self.resource_row(row) for row in rows])
+            with db() as connection: rows = connection.execute("select * from resources where (?='' or item_id=?) order by created_at desc", (item_id,item_id)).fetchall()
+            user=self.user(False)
+            return self.json_response([self.resource_row(row) for row in rows if (user and user['role']=='admin') or (row['is_published'] and self.content_visible(row['item_id']))])
         if method == "POST" and path == "/api/resources":
             self.admin(); item_id = self.headers.get("X-Item-Id", ""); filename = unquote(self.headers.get("X-Filename", "file"))
             length = int(self.headers.get("Content-Length", "0"))
             if not item_id or length <= 0 or length > MAX_UPLOAD: raise ApiError(400, "Файл өлшемін тексеріңіз")
             resource_id = str(uuid.uuid4()); stored_name = resource_id
-            payload = self.rfile.read(length); (UPLOAD_DIR / stored_name).write_bytes(payload)
+            if Path(filename).suffix.lower() not in {'.pdf','.doc','.docx','.ppt','.pptx','.xls','.xlsx','.png','.jpg','.jpeg','.webp','.gif','.mp4','.webm','.mp3','.wav','.zip'}: raise ApiError(400,'Бұл файл түріне қолдау көрсетілмейді')
+            with db() as connection:
+                if not connection.execute('select id from content_items where id=?',(item_id,)).fetchone(): raise ApiError(404,'Материал табылмады')
+            payload = self.rfile.read(length)
+            if len(payload)!=length: raise ApiError(400,'Файл толық жүктелмеді')
+            (UPLOAD_DIR / stored_name).write_bytes(payload)
             mime = self.headers.get("Content-Type") or mimetypes.guess_type(filename)[0] or "application/octet-stream"
-            with db() as connection: connection.execute("insert into resources values (?,?,?,?,?,?,?)", (resource_id,item_id,filename,stored_name,mime,length,now()))
+            try:
+                with db() as connection: connection.execute("insert into resources(id,item_id,filename,stored_name,mime_type,size,created_at) values (?,?,?,?,?,?,?)", (resource_id,item_id,filename,stored_name,mime,length,now()))
+            except Exception:
+                (UPLOAD_DIR / stored_name).unlink(missing_ok=True)
+                raise
             return self.json_response(self.resource_row({"id":resource_id,"item_id":item_id,"filename":filename,"mime_type":mime,"size":length,"created_at":now()}), 201)
         if method == "GET" and path.startswith("/api/presentations/"):
             resource_id = unquote(path.rsplit("/",1)[1])
             with db() as connection: row = connection.execute("select * from resources where id=?", (resource_id,)).fetchone()
             if not row: raise ApiError(404, "Файл табылмады")
+            self.require_content(row["item_id"])
+            if not row["is_published"] and (self.user(False) or {}).get("role")!="admin": raise ApiError(403,"Материал жасырылған")
             if not row["filename"].lower().endswith(".pptx"): raise ApiError(422, "PPTX форматы қажет")
             return self.json_response(presentation_preview(UPLOAD_DIR / row["stored_name"], resource_id))
         if method == "GET" and path.startswith("/api/presentation-assets/"):
@@ -420,6 +477,8 @@ class SpaHandler(SimpleHTTPRequestHandler):
             if not asset_path.startswith("ppt/media/") or ".." in asset_path.split("/"): raise ApiError(400, "Файл жолы қате")
             with db() as connection: row = connection.execute("select * from resources where id=?", (resource_id,)).fetchone()
             if not row: raise ApiError(404, "Файл табылмады")
+            self.require_content(row["item_id"])
+            if not row["is_published"] and (self.user(False) or {}).get("role")!="admin": raise ApiError(403,"Материал жасырылған")
             try:
                 with zipfile.ZipFile(UPLOAD_DIR / row["stored_name"]) as archive:
                     info = archive.getinfo(asset_path)
@@ -432,9 +491,23 @@ class SpaHandler(SimpleHTTPRequestHandler):
             resource_id = unquote(path.rsplit("/",1)[1])
             with db() as connection: row = connection.execute("select * from resources where id=?", (resource_id,)).fetchone()
             if not row: raise ApiError(404, "Файл табылмады")
+            self.require_content(row["item_id"])
+            if not row["is_published"] and (self.user(False) or {}).get("role")!="admin": raise ApiError(403,"Материал жасырылған")
             file_path = UPLOAD_DIR / row["stored_name"]
             disposition = "attachment" if query.get("download", [""])[0] == "1" else "inline"
             self.send_response(200); self.send_header("Content-Type", row["mime_type"]); self.send_header("Content-Length", str(file_path.stat().st_size)); self.send_header("Content-Disposition", f"{disposition}; filename*=UTF-8''{quote(row['filename'])}"); self.end_headers(); self.wfile.write(file_path.read_bytes()); return
+        if method == "PATCH" and path.startswith("/api/resources/"):
+            self.admin();resource_id=unquote(path.rsplit('/',1)[1]);patch=self.read_json()
+            with db() as connection:
+                row=connection.execute('select * from resources where id=?',(resource_id,)).fetchone()
+                if not row: raise ApiError(404,'Материал табылмады')
+                data=dict(row)
+                for field in ('title','description','subject','category'):
+                    if field in patch:data[field]=str(patch[field]).strip()[:1500]
+                if 'title' in patch and not data['title']: raise ApiError(400,'Материал атауын енгізіңіз')
+                data['is_published']=1 if patch.get('is_published',data['is_published']) else 0
+                connection.execute('update resources set title=?,description=?,subject=?,category=?,is_published=? where id=?',tuple(data[field] for field in ('title','description','subject','category','is_published'))+(resource_id,))
+            return self.json_response(self.resource_row(data))
         if method == "DELETE" and path.startswith("/api/resources/"):
             self.admin(); resource_id = unquote(path.rsplit("/",1)[1])
             with db() as connection:
@@ -505,7 +578,7 @@ class SpaHandler(SimpleHTTPRequestHandler):
         return data
 
     def resource_row(self, row):
-        data = dict(row); data["url"] = f"/api/files/{data['id']}"
+        data = dict(row); data.pop("stored_name",None); data["url"] = f"/api/files/{data['id']}"
         if data.get("filename", "").lower().endswith(".pptx"): data["presentation_url"] = f"/api/presentations/{data['id']}"
         return data
 
@@ -546,6 +619,7 @@ class SpaHandler(SimpleHTTPRequestHandler):
         for key, allowed in enum_values.items():
             if data.get(key) in allowed: settings[key] = data[key]
         settings["visual_effects"] = bool(data.get("visual_effects", True))
+        settings["interface_version"] = 2
         return settings
 
     def handle_api(self, method):
@@ -553,7 +627,7 @@ class SpaHandler(SimpleHTTPRequestHandler):
         except ApiError as error: return self.json_response({"message":error.message}, error.status)
         except sqlite3.IntegrityError: return self.json_response({"message":"URL немесе мәлімет бұрын қолданылған"}, 409)
         except Exception as error:
-            return self.json_response({"message":"Сервер қатесі","detail":str(error)}, 500)
+            return self.json_response({"message":"Сервер қатесі. Қайта әрекет жасап көріңіз"}, 500)
 
     def do_GET(self):
         path = urlparse(self.path).path
@@ -562,9 +636,18 @@ class SpaHandler(SimpleHTTPRequestHandler):
             config = {"supabaseUrl":os.environ.get("SUPABASE_URL", ""),"supabaseAnonKey":os.environ.get("SUPABASE_ANON_KEY", "")}
             payload = f"window.__CHEM_CONFIG__ = {json.dumps(config)};".encode("utf-8")
             self.send_response(200); self.send_header("Content-Type","application/javascript; charset=utf-8"); self.send_header("Cache-Control","no-store"); self.send_header("Content-Length",str(len(payload))); self.end_headers(); self.wfile.write(payload); return
+        public_assets={'/index.html','/404.html','/app.js','/store.js','/data.js','/catalog.js','/platform-utils.js','/styles.css','/components.css','/accessibility.css','/learning.css','/platform.css'}
         target = ROOT / path.lstrip("/")
+        if path != "/" and path not in public_assets and (target.exists() or any(part.startswith('.') for part in path.split('/') if part) or '.' in target.name):
+            self.send_error(404);return
         if path == "/" or (not target.exists() and "." not in target.name): self.path = "/index.html"
         return super().do_GET()
+
+    def do_HEAD(self):
+        path=urlparse(self.path).path
+        if path.startswith('/api/') or path not in {'/','/index.html','/404.html','/config.js','/app.js','/store.js','/data.js','/catalog.js','/platform-utils.js','/styles.css','/components.css','/accessibility.css','/learning.css','/platform.css'}:
+            self.send_error(404);return
+        return super().do_HEAD()
 
     def do_POST(self): return self.handle_api("POST")
     def do_PATCH(self): return self.handle_api("PATCH")
