@@ -23,9 +23,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Test application
+        run: |
+          node --check app.js
+          node --check store.js
+          node --test tests/platform.mjs
+          python3 tests/integration.py
+          python3 tests/security.py
+      - name: Stage public assets only
+        run: |
+          mkdir -p public-site
+          cp index.html 404.html .nojekyll app.js store.js data.js config.js catalog.js platform-utils.js styles.css components.css accessibility.css learning.css platform.css public-site/
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: .
+          path: public-site
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
