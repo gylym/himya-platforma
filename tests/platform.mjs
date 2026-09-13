@@ -78,3 +78,26 @@ test('lost metadata response preserves a successfully registered upload',async()
  store.request=async(path,options)=>{if(options.method==='POST')throw new Error('network');if(options.method==='DELETE')assert.fail('must preserve registered file');return [{id:'confirmed'}];};
  assert.equal((await store.uploadResource('item',{name:'test.pdf',size:20,type:'application/pdf'})).id,'confirmed');
 });
+
+// Exercise the actual browser boot function with overlapping account changes.
+import {readFileSync} from 'node:fs';
+import vm from 'node:vm';
+test('a late admin boot cannot restore hidden data after a guest boot',async()=>{
+ const source=readFileSync(new URL('../app.js',import.meta.url),'utf8');
+ const bootSource=source.slice(source.indexOf('let bootGeneration=0;'),source.indexOf("window.addEventListener('storage'"));
+ assert.ok(bootSource.startsWith('let bootGeneration=0;'));
+ const blocked=pending(),started=pending();let actor='admin',authReads=0,renders=0;
+ const state={loading:true,settings:{}};
+ const store={mode:'supabase',currentUser:async()=>{authReads++;return actor==='admin'?{id:'admin',role:'admin'}:null;},
+  listContent:async admin=>{if(admin){started.resolve();await blocked.promise;return [{id:'hidden'}];}return [{id:'public'}];},
+  listAllResources:async()=>[{id:actor==='admin'?'private-file':'public-file',item_id:actor==='admin'?'hidden':'public'}],
+  listUsers:async()=>[{id:'private-user'}],getProgress:async()=>[],getSettings:async()=>({interface_version:2})};
+ const context={state,store,window:{__CHEM_CONFIG__:{schemaVersion:1}},DEFAULT_THEME:{},normalizeItems:items=>items,
+  errorMessage:error=>error.message,showToast(){},applyTheme(){},render(){renders++;},hydrateRoute(){}};
+ vm.runInNewContext(bootSource+'\nglobalThis.runBoot=boot;',context);
+ const oldBoot=context.runBoot();await started.promise;actor='guest';await context.runBoot();
+ blocked.resolve();await oldBoot;
+ assert.equal(state.user,null);assert.equal(state.items[0].id,'public');
+ assert.equal(state.allResources[0].id,'public-file');assert.equal(state.users.length,0);
+ assert.equal(state.bootError,null);assert.equal(renders,1);assert.equal(authReads,2);
+});
