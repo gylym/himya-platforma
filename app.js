@@ -252,9 +252,26 @@ async function handleMaterial(event){
  }catch(err){error.textContent=errorMessage(err)+(fileSaved?' Файл сақталды. Жариялау күйін тексеріп, қайта сақтаңыз.':item&&!existing?' Материал жоба ретінде сақталды. Файлды қайта жүктеңіз.':'');if(item){try{state.items=normalizeItems(await store.listContent(true));}catch{/* Keep the original upload error and the form for retry. */}}}
  finally{button.disabled=false;button.textContent='Сақтау';}
 }
+let bootGeneration=0;
 async function boot(){
- state.bootError=null;try{await store.init();state.user=await store.currentUser();state.items=normalizeItems(await store.listContent(state.user?.role==='admin'));await refreshCatalog();if(state.user?.role==='admin')state.users=await store.listUsers();else if(state.user)state.progress=await store.getProgress();try{const saved=await store.getSettings();state.settings={...DEFAULT_THEME,...saved};if(!saved.interface_version){for(const k of ["background","surface","text","muted","school","university","bridge","diagnostic"])state.settings[k]=DEFAULT_THEME[k];state.settings.visual_effects=false;}}catch(error){showToast(error.message,'error');}}
- catch(error){state.bootError=errorMessage(error);}finally{applyTheme();state.loading=false;render();hydrateRoute();}
+ const generation=++bootGeneration;state.bootError=null;
+ try{
+  const user=await store.currentUser();if(generation!==bootGeneration)return;
+  const admin=user?.role==='admin';
+  const [items,resources,accountData,saved,popularity]=await Promise.all([
+   store.listContent(admin),store.listAllResources(),
+   admin?store.listUsers():user?store.getProgress():Promise.resolve([]),
+   store.getSettings().catch(error=>{if(generation===bootGeneration)showToast(error.message,'error');return {};}),
+   store.mode==='local-server'||window.__CHEM_CONFIG__?.schemaVersion>=2?store.listPopularity().catch(()=>[]):Promise.resolve([])
+  ]);
+  if(generation!==bootGeneration)return;state.user=user;
+  state.items=normalizeItems(items);state.allResources=resources;state.resources={};
+  for(const item of state.items)state.resources[item.id]=resources.filter(resource=>resource.item_id===item.id);
+  state.users=admin?accountData:[];state.progress=admin?[]:accountData;state.popularity=popularity;
+  state.settings={...DEFAULT_THEME,...saved};
+  if(!saved.interface_version){for(const k of ["background","surface","text","muted","school","university","bridge","diagnostic"])state.settings[k]=DEFAULT_THEME[k];state.settings.visual_effects=false;}
+ }catch(error){if(generation===bootGeneration)state.bootError=errorMessage(error);}
+ finally{if(generation===bootGeneration){applyTheme();state.loading=false;render();hydrateRoute();}}
 }
 window.addEventListener('storage',event=>{if(['chem_supabase_session_v1','chem_server_session_v1'].includes(event.key)){state.user=null;state.users=[];state.analytics=null;state.resources={};state.allResources=[];state.previewing=null;state.loading=true;render();boot();}});
 render();boot();
