@@ -9,6 +9,8 @@ class SiteSmokeTests(unittest.TestCase):
             "/", "/mektep", "/universitet", "/sabaktastyk-kopiri",
             "/korytyndy-diagnostika", "/login", "/register", "/admin", "/kabinet",
             "/mektep/teoriya/7-synyp", "/belgisiz-bet",
+            "/learn/redox", "/games/redox", "/results", "/profile",
+            "/forgot-password", "/reset-password", "/himya-platforma/games/redox",
         ]
         for route in routes:
             with self.subTest(route=route):
@@ -17,7 +19,7 @@ class SiteSmokeTests(unittest.TestCase):
                 self.assertIn("Үздіксіз білім беру платформасы", response.read().decode("utf-8"))
 
     def test_assets(self):
-        for path in ["/app.js", "/store.js", "/data.js", "/styles.css", "/components.css", "/accessibility.css", "/learning.css", "/config.js"]:
+        for path in ["/app.js", "/store.js", "/data.js", "/styles.css", "/components.css", "/accessibility.css", "/learning.css", "/config.js", "/learning.js", "/learning-api.js", "/redox-data.js", "/experience.css"]:
             with self.subTest(path=path):
                 self.assertEqual(urlopen(BASE + path).status, 200)
 
