@@ -88,7 +88,7 @@ export class SupabaseStore {
     if(typeof password!=='string'||password.length<8)throw new Error('Пароль кемінде 8 таңбадан тұруы керек');
     if(username&&!/^[a-z0-9_]{3,32}$/i.test(username.trim()))throw new Error('Логин 3–32 латын әрпі, сан немесе _ таңбасынан тұруы керек');
     const version=++this.authVersion;
-    const session=await this.request('/auth/v1/signup',{method:'POST',headers:this.headers(null),body:JSON.stringify({email:normalizeEmail(email),password,data:{display_name:displayName.trim(),username:username?.trim().toLowerCase(),role}})});
+    const session=await this.request('/auth/v1/signup?redirect_to='+encodeURIComponent(typeof document==='undefined'?'':new URL('./',document.baseURI).href),{method:'POST',headers:this.headers(null),body:JSON.stringify({email:normalizeEmail(email),password,data:{display_name:displayName.trim(),username:username?.trim().toLowerCase(),role}})});
     if(version!==this.authVersion)throw new Error('Кіру әрекеті тоқтатылды');
     if(!session?.access_token)return {confirmationRequired:true};
     this.saveSession(session);return this.currentUser();

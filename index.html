@@ -10,7 +10,7 @@
       // Keep static assets anchored to the application root even when a
       // GitHub Pages deep link is restored with the History API.
       document.write(
-        `<base href="${location.hostname.endsWith("github.io") ? "/himya-platforma/" : "/"}">`,
+        `<base href="${(location.hostname.endsWith("github.io")||/^\/himya-platforma(?:\/|$)/.test(location.pathname)) ? "/himya-platforma/" : "/"}">`,
       );
 
       (function (location) {
@@ -25,6 +25,7 @@
     <link rel="stylesheet" href="accessibility.css" />
     <link rel="stylesheet" href="learning.css" />
     <link rel="stylesheet" href="platform.css" />
+    <link rel="stylesheet" href="experience.css" />
     <meta name="description" content="Химия пәні бойынша оқу материалдары, тапсырмалар және пайдалы ресурстар." />
   </head>
   <body>

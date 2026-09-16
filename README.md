@@ -1,5 +1,7 @@
 # Химия білім беру платформасы
 
+2026-09-16: Redox Lab ойыны, оқу жолы, профиль өңдеу және email/password callback қосылды. Іске қосу, migration және тексеру шектері: [RELEASE-REDOX.md](RELEASE-REDOX.md), [QA-REDOX.md](QA-REDOX.md). Preview: `node preview.mjs`; build: `node build.mjs`.
+
 GitHub Pages frontend + Supabase Auth / PostgreSQL / Storage. Мектеп және университет курстары, оқу материалдары, тесттер, прогресс және әкімші басқаруы.
 
 Жаңарту ретін, сыртқы қызметтерге қажетті қолжетімділікті және тексеру шектерін **[DEPLOYMENT.md](DEPLOYMENT.md)** файлынан оқыңыз.
